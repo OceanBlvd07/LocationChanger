@@ -1,25 +1,78 @@
 import Foundation
 
 final class DeviceConnection {
-    // The executable inside our project's Python environment.
-    let executableURL: URL
+    // No backend is selected on a fresh installation.
+    private(set) var executableURL: URL?
+
+    func selectExecutable(_ url: URL) throws {
+        // Don't change the backend while a session still needs cleanup.
+        guard !needsCleanup else {
+            throw NSError(
+                domain: "DeviceConnection",
+                code: 5,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Stop the current session before changing the backend."
+                ]
+            )
+        }
+
+        guard FileManager.default.isExecutableFile(atPath: url.path) else {
+            throw NSError(
+                domain: "DeviceConnection",
+                code: 6,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Choose an executable pymobiledevice3 file."
+                ]
+            )
+        }
+
+        executableURL = url
+
+        // Remember this Mac's selection between launches.
+        UserDefaults.standard.set(url.path, forKey: "backendExecutablePath")
+    }
     
     // Keep the simulation process alive so Stop can end it later.
     private var simulationProcess: Process?
 
     // Keep its input open while the simulation is running.
     private var simulationInput: Pipe?
+    // Remains true until cleanup succeeds, even if the process exits.
+    private(set) var needsCleanup = false
     // Notify the UI when the simulation command finishes.
     // The integer is the process's exit code.
     var onSimulationExit: (@MainActor @Sendable (Int32) -> Void)?
 
-    // Classes need an explicit initializer for this stored property.
-    init(executableURL: URL) {
-        self.executableURL = executableURL
+    init() {
+        // Restore the backend selected on this Mac.
+        if let path = UserDefaults.standard.string(
+            forKey: "backendExecutablePath"
+        ) {
+            executableURL = URL(fileURLWithPath: path)
+        }
+    }
+
+    // Validate the selection whenever we launch a command.
+    private func requireExecutable() throws -> URL {
+        guard let url = executableURL,
+              FileManager.default.isExecutableFile(atPath: url.path) else {
+            throw NSError(
+                domain: "DeviceConnection",
+                code: 7,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Choose your pymobiledevice3 executable first."
+                ]
+            )
+        }
+
+        return url
     }
 
     func listDevices() async throws -> [ConnectedDevice] {
-        let toolURL = executableURL
+        let toolURL = try requireExecutable()
 
         // Run the command away from the UI so the window stays responsive.
         return try await Task.detached {
@@ -90,7 +143,7 @@ final class DeviceConnection {
         let process = Process()
         let input = Pipe()
 
-        process.executableURL = executableURL
+        process.executableURL = try requireExecutable()
         process.arguments = [
             "developer", "dvt", "simulate-location", "set",
             "--", String(latitude), String(longitude)
@@ -119,10 +172,11 @@ final class DeviceConnection {
         // Retain both objects for the lifetime of the session.
         simulationProcess = process
         simulationInput = input
+        needsCleanup = true
     }
     func stopSimulation() async throws {
         let activeProcess = simulationProcess
-        let toolURL = executableURL
+        let toolURL = try requireExecutable()
 
         try await Task.detached {
             // First request an interrupt, similar to Control-C in Terminal.
@@ -192,6 +246,7 @@ final class DeviceConnection {
         // Reset only after both checks succeed.
         simulationProcess = nil
         simulationInput = nil
+        needsCleanup = false
     }
     // Wait for a process, but stop waiting after the specified time.
     // Call this from a background task because it briefly blocks its thread.

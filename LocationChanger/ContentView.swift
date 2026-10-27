@@ -1,5 +1,6 @@
 import SwiftUI
 import MapKit
+import AppKit
 
 struct ContentView: View {
     @State private var latitude = ""
@@ -24,18 +25,18 @@ struct ContentView: View {
     // Prevent duplicate clicks while checking the connected device.
     @State private var isStarting = false
     
-    // Preserve the same connection object when SwiftUI updates the view.
-    @State private var deviceConnection = DeviceConnection(
-        executableURL: URL(
-            fileURLWithPath:
-                "/Users/markoandruhiv/Documents/LocationChanger/.venv/bin/pymobiledevice3"
-        )
-    )
+    // Use the shared connection instead of creating another one.
+    let deviceConnection: DeviceConnection
     
     var body: some View {
         VStack(spacing: 16) {
             Text("Location Changer")
                 .font(.title)
+            Button("Choose backend…") {
+                chooseBackend()
+            }
+            // Keep the backend fixed while commands or cleanup are in progress.
+            .disabled(hasSimulationSession || isStarting || isStopping)
             HStack {
                 TextField("Search for a place or address", text: $searchQuery)
 
@@ -207,6 +208,33 @@ struct ContentView: View {
         }
     }
     @MainActor
+    private func chooseBackend() {
+        let panel = NSOpenPanel()
+
+        panel.title = "Choose pymobiledevice3"
+        panel.message = "Select the executable inside your project's .venv/bin folder."
+        panel.prompt = "Choose"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+
+        // Python environments are usually inside a hidden .venv folder.
+        panel.showsHiddenFiles = true
+
+        // Opening the picker does not execute the selected file.
+        guard panel.runModal() == .OK,
+              let url = panel.url else {
+            return
+        }
+
+        do {
+            try deviceConnection.selectExecutable(url)
+            status = "Backend selected: \(url.lastPathComponent)"
+        } catch {
+            status = error.localizedDescription
+        }
+    }
+    @MainActor
     private func searchLocation() async {
         isSearching = true
 
@@ -246,5 +274,5 @@ struct ContentView: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(deviceConnection: AppDelegate().deviceConnection)
 }
