@@ -4,28 +4,48 @@ struct DeviceConnection {
     // The executable inside our project's Python environment.
     let executableURL: URL
 
-    func listDevices() throws -> Process {
-        let process = Process()
+    func listDevices() async throws -> [ConnectedDevice] {
+        let toolURL = executableURL
 
-        // Run the executable directly, without a shell.
-        process.executableURL = executableURL
+        // Run the command away from the UI so the window stays responsive.
+        return try await Task.detached {
+            let process = Process()
+            let output = Pipe()
 
-        // Each argument is passed separately.
-        process.arguments = ["usbmux", "list"]
+            process.executableURL = toolURL
+            process.arguments = ["usbmux", "list"]
 
-        // Output goes to Xcode's console for this first version.
-        process.standardOutput = FileHandle.standardOutput
-        process.standardError = FileHandle.standardError
-        
-        // Ask command-line libraries to output plain text without ANSI colors.
-        var environment = ProcessInfo.processInfo.environment
-        environment["NO_COLOR"] = "1"
-        environment["TERM"] = "dumb"
-        process.environment = environment
-        
-        // Starts the command and throws if it cannot launch.
-        try process.run()
+            // Capture JSON output; keep diagnostic errors in Xcode's console.
+            process.standardOutput = output
+            process.standardError = FileHandle.standardError
 
-        return process
+            var environment = ProcessInfo.processInfo.environment
+            environment["NO_COLOR"] = "1"
+            environment["TERM"] = "dumb"
+            process.environment = environment
+
+            try process.run()
+
+            // Read output while the command runs, then wait for it to finish.
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+
+            guard process.terminationStatus == 0 else {
+                throw NSError(
+                    domain: "DeviceConnection",
+                    code: Int(process.terminationStatus),
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Device discovery failed. Check Xcode's console."
+                    ]
+                )
+            }
+
+            // Convert the JSON array into our Swift device objects.
+            return try JSONDecoder().decode(
+                [ConnectedDevice].self,
+                from: data
+            )
+        }.value
     }
 }

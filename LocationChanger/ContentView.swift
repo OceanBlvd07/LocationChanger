@@ -85,17 +85,22 @@ struct ContentView: View {
                 status = "Selected: \(lat), \(lon)"
             }
             Button("List connected devices") {
-                do {
-                    // Launch the command; its output appears in Xcode's console.
-                    _ = try deviceConnection.listDevices()
-                    status = "Device check launched — see Xcode console"
-                } catch {
-                    // Include the error domain, code, and underlying details.
-                    let details = error as NSError
-                    print("Device launch error:", details.domain, details.code)
-                    print("Details:", details.userInfo)
+                // Task lets the button call an asynchronous function.
+                Task {
+                    status = "Looking for an iPhone…"
 
-                    status = "Couldn't launch device check: \(error.localizedDescription)"
+                    do {
+                        let devices = try await deviceConnection.listDevices()
+
+                        // Show the first device for this initial version.
+                        if let device = devices.first {
+                            status = "\(device.name) — iOS \(device.version)"
+                        } else {
+                            status = "No devices found. Connect and unlock your iPhone."
+                        }
+                    } catch {
+                        status = "Device check failed: \(error.localizedDescription)"
+                    }
                 }
             }
 
