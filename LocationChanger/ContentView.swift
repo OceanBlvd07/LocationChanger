@@ -9,8 +9,9 @@ struct ContentView: View {
 
     @State private var searchQuery = ""
     @State private var isSearching = false
+    @State private var isCheckingDevices = false
 
-    // Changing this requests that the native map center on the selection.
+    // Change this to request centering on the selected coordinates.
     @State private var mapFocusRequest = UUID()
 
     @State private var hasSimulationSession = false
@@ -19,7 +20,6 @@ struct ContentView: View {
 
     let deviceConnection: DeviceConnection
 
-    // The fields remain the source of truth for the selected location.
     private var selectedCoordinate: CLLocationCoordinate2D? {
         guard let lat = Double(latitude),
               let lon = Double(longitude),
@@ -36,130 +36,153 @@ struct ContentView: View {
         )
     }
 
+    private var sessionStatus: String {
+        if isStopping {
+            return "Stopping"
+        }
+
+        if isStarting {
+            return "Starting"
+        }
+
+        return hasSimulationSession ? "Session launched" : "Ready"
+    }
+
     var body: some View {
-        ZStack {
-            // The map fills the window behind the floating controls.
+        ZStack(alignment: .leading) {
+            // Leave the map visible behind the glass sidebar.
             locationMap
 
-            GlassEffectContainer(spacing: 24) {
-                VStack(spacing: 20) {
-                    searchPanel
-
-                    // This area stays open for interacting with the map.
-                    Spacer(minLength: 100)
-
-                    selectionPanel
-                }
-                .padding(20)
-            }
+            sidebar
+                .padding(16)
         }
-        .textFieldStyle(.roundedBorder)
-        .frame(minWidth: 640, minHeight: 720)
+        .frame(minWidth: 900, minHeight: 660)
         .onAppear {
             registerExitCallback()
         }
     }
 
-    // MARK: - Glass panels
+    // MARK: - Glass sidebar
 
-    private var searchPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Label(
-                    "Location Changer",
-                    systemImage: "location.fill"
-                )
-                .font(.headline)
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sidebarHeader
+                .padding(.bottom, 24)
 
-                Spacer()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    searchControls
 
-                Button {
-                    chooseBackend()
-                } label: {
-                    Image(systemName: "gearshape")
+                    Divider()
+
+                    coordinateFields
+
+                    Button {
+                        centerOnSelection()
+                    } label: {
+                        Label(
+                            "Center on selection",
+                            systemImage: "scope"
+                        )
+                        .frame(maxWidth: .infinity)
+                    }
+                    .disabled(selectedCoordinate == nil)
+
+                    Divider()
+
+                    simulationControls
+
+                    Text(
+                        "Click the map to place a marker. "
+                        + "Select and drag it to adjust the location."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
-                .help("Choose backend")
-                .disabled(
-                    hasSimulationSession ||
-                    isStarting ||
-                    isStopping
-                )
+                .padding(.bottom, 16)
             }
 
-            searchControls
+            Spacer(minLength: 16)
+
+            Divider()
+                .padding(.bottom, 16)
+
+            deviceControls
         }
-        .padding(18)
-        // Apply glass after padding so it surrounds the entire panel.
+        .scrollClipDisabled()
+        .padding(20)
+        .frame(width: 320)
+        .frame(maxHeight: .infinity)
+        .textFieldStyle(.roundedBorder)
         .glassEffect(
             .regular,
-            in: RoundedRectangle(cornerRadius: 24)
+            in: RoundedRectangle(cornerRadius: 26)
         )
     }
 
-    private var selectionPanel: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Selected location")
+    private var sidebarHeader: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "location.fill")
+                .font(.title2)
+                .foregroundStyle(.tint)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Location Changer")
                     .font(.headline)
 
-                Spacer()
-
-                Button {
-                    centerOnSelection()
-                } label: {
-                    Image(systemName: "scope")
-                }
-                .help("Center on selected location")
-                .disabled(selectedCoordinate == nil)
+                Text(sessionStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
-            coordinateFields
+            Spacer(minLength: 0)
 
-            HStack {
-                simulationControls
-
-                Spacer()
-
-                Button {
-                    Task {
-                        await listDevices()
-                    }
-                } label: {
-                    Image(systemName: "iphone")
-                }
-                .help("Check connected iPhone")
-                .disabled(isStarting || isStopping)
+            Button {
+                chooseBackend()
+            } label: {
+                Image(systemName: "gearshape")
             }
-
-            Divider()
-
-            Text(status)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            .help("Choose backend")
+            .disabled(
+                hasSimulationSession ||
+                isStarting ||
+                isStopping ||
+                isCheckingDevices
+            )
         }
-        .padding(18)
-        .glassEffect(
-            .regular,
-            in: RoundedRectangle(cornerRadius: 24)
-        )
     }
 
     // MARK: - Search controls
 
     private var searchControls: some View {
-        HStack {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Search")
+                .font(.subheadline.weight(.semibold))
+
             TextField(
-                "Search for a place or address",
+                "Place or address",
                 text: $searchQuery
             )
             .onSubmit {
                 beginSearch()
             }
 
-            Button(isSearching ? "Searching…" : "Search") {
+            Button {
                 beginSearch()
+            } label: {
+                HStack(spacing: 8) {
+                    if isSearching {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "magnifyingglass")
+                    }
+
+                    Text(isSearching ? "Searching…" : "Search")
+                }
+                .frame(maxWidth: .infinity)
             }
             .disabled(
                 isSearching ||
@@ -186,25 +209,30 @@ struct ContentView: View {
     // MARK: - Native map
 
     private var locationMap: some View {
-        // The native component handles marker dragging and map navigation.
         LocationMapView(
             latitude: $latitude,
             longitude: $longitude,
             focusRequest: mapFocusRequest
         )
+        // Reserve room for the sidebar so centered markers aren't hidden.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.background)
     }
 
     // MARK: - Coordinate fields
 
     private var coordinateFields: some View {
-        HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Selected coordinates")
+                .font(.subheadline.weight(.semibold))
+
             VStack(alignment: .leading, spacing: 6) {
                 Text("Latitude")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 TextField("−90 to 90", text: $latitude)
+                    .monospacedDigit()
                     .onSubmit {
                         centerOnSelection()
                     }
@@ -216,6 +244,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 TextField("−180 to 180", text: $longitude)
+                    .monospacedDigit()
                     .onSubmit {
                         centerOnSelection()
                     }
@@ -226,7 +255,7 @@ struct ContentView: View {
     private func updateCoordinates(
         _ coordinate: CLLocationCoordinate2D
     ) {
-        // Keep decimal-point formatting independent of the Mac's region.
+        // Always use a decimal point when formatting coordinates.
         let locale = Locale(identifier: "en_US_POSIX")
 
         latitude = String(
@@ -248,44 +277,95 @@ struct ContentView: View {
             return
         }
 
-        // Ask the map to center without resetting it on every field edit.
         mapFocusRequest = UUID()
     }
 
     // MARK: - Simulation controls
 
     private var simulationControls: some View {
-        HStack {
-            Button(isStarting ? "Starting…" : "Start simulation") {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Simulation")
+                .font(.subheadline.weight(.semibold))
+
+            Button {
                 guard let coordinate = selectedCoordinate else {
                     status = "Enter valid coordinates"
                     return
                 }
 
-                // Capture the selected location before the device check.
+                // Capture the selection before checking the device.
                 isStarting = true
 
                 Task {
                     await startSimulation(at: coordinate)
                 }
+            } label: {
+                Label(
+                    isStarting ? "Starting…" : "Start simulation",
+                    systemImage: "play.fill"
+                )
+                .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
             .disabled(
                 hasSimulationSession ||
                 isStarting ||
                 isStopping ||
+                isCheckingDevices ||
                 selectedCoordinate == nil
             )
 
-            Button(
-                isStopping ? "Stopping…" : "Stop / restore location"
-            ) {
+            Button {
                 isStopping = true
 
                 Task {
                     await stopSimulation()
                 }
+            } label: {
+                Label(
+                    isStopping ? "Stopping…" : "Stop / restore location",
+                    systemImage: "stop.fill"
+                )
+                .frame(maxWidth: .infinity)
             }
+            .controlSize(.large)
             .disabled(!hasSimulationSession || isStopping)
+
+            if hasSimulationSession {
+                Text("Changing the selection won't update this session.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    // MARK: - Device and status
+
+    private var deviceControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                isCheckingDevices = true
+
+                Task {
+                    await listDevices()
+                }
+            } label: {
+                Label(
+                    isCheckingDevices ? "Checking…" : "Check connected iPhone",
+                    systemImage: "iphone"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .disabled(isCheckingDevices || isStarting || isStopping)
+
+            Text(status)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -347,6 +427,7 @@ struct ContentView: View {
 
     @MainActor
     private func listDevices() async {
+        defer { isCheckingDevices = false }
         status = "Looking for an iPhone…"
 
         do {
@@ -407,7 +488,7 @@ struct ContentView: View {
             hasSimulationSession = false
             status = "Clear completed — verify real location in Maps"
         } catch {
-            // Keep Stop available when cleanup needs to be retried.
+            // Keep recovery available if clearing fails.
             status = "Couldn't restore: \(error.localizedDescription)"
         }
     }
