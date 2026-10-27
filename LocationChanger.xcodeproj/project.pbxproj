@@ -6,8 +6,13 @@
 	objectVersion = 90;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		2C8E237C30915ECB0033D095 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 2C8E237B30915EC40033D095 /* README.md */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* LocationChanger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LocationChanger.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2C8E237B30915EC40033D095 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -30,6 +35,7 @@
 		000000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
+				2C8E237B30915EC40033D095 /* README.md */,
 				000000000000000000000010 /* LocationChanger */,
 				000000000000000000000020 /* Products */,
 			);
@@ -102,6 +108,7 @@
 		000000000000000140000000 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
+				2C8E237C30915ECB0033D095 /* README.md in Resources */,
 			);
 		};
 /* End PBXResourcesBuildPhase section */
