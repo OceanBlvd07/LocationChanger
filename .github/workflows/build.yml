@@ -1,0 +1,34 @@
+name: Build macOS app
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build app
+        run: |
+          xcodebuild \
+            -project LocationChanger.xcodeproj \
+            -scheme LocationChanger \
+            -configuration Debug \
+            -destination 'generic/platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
