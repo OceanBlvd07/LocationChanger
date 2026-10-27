@@ -6,13 +6,35 @@ struct ContentView: View {
     @State private var longitude = ""
     @State private var status = "Enter coordinates"
     
+    // Stores the address or place name entered in the search field.
+    @State private var searchQuery = ""
+
+    // Controls which area the map displays.
+    @State private var cameraPosition: MapCameraPosition = .automatic
+
+    // Prevents multiple searches from running at once.
+    @State private var isSearching = false
+    
     var body: some View {
         VStack(spacing: 16) {
             Text("Location Changer")
                 .font(.title)
+            HStack {
+                TextField("Search for a place or address", text: $searchQuery)
+
+                Button(isSearching ? "Searching…" : "Search") {
+                    Task {
+                        await searchLocation()
+                    }
+                }
+                .disabled(
+                    isSearching ||
+                    searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+            }
             // Gives us a proxy that converts screen positions into map coordinates.
             MapReader { proxy in
-                Map {
+                Map(position: $cameraPosition) {
                     // Show a pin only when both fields contain valid coordinates.
                     if let lat = Double(latitude),
                        let lon = Double(longitude),
@@ -62,6 +84,43 @@ struct ContentView: View {
         .textFieldStyle(.roundedBorder)
         .padding(24)
         .frame(width: 600)
+    }
+    @MainActor
+    private func searchLocation() async {
+        isSearching = true
+
+        // Restore the button whether the search succeeds or fails.
+        defer { isSearching = false }
+
+        let searchService = LocationSearchService()
+
+        do {
+            guard let result = try await searchService.search(query: searchQuery) else {
+                status = "No places found"
+                return
+            }
+
+            // Update the fields and pin using the returned location.
+            let coordinate = result.location.coordinate
+            latitude = String(format: "%.6f", coordinate.latitude)
+            longitude = String(format: "%.6f", coordinate.longitude)
+
+            // Move the map to the selected place.
+            cameraPosition = .region(
+                MKCoordinateRegion(
+                    center: coordinate,
+                    span: MKCoordinateSpan(
+                        latitudeDelta: 0.02,
+                        longitudeDelta: 0.02
+                    )
+                )
+            )
+
+            status = "Selected: \(result.name ?? searchQuery)"
+        } catch {
+            // Display errors passed back by the service.
+            status = "Search failed: \(error.localizedDescription)"
+        }
     }
 }
 
