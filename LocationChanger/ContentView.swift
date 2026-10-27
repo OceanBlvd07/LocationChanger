@@ -15,6 +15,14 @@ struct ContentView: View {
     // Prevents multiple searches from running at once.
     @State private var isSearching = false
     
+    // Points to the Python tool installed in this project's environment.
+    private let deviceConnection = DeviceConnection(
+        executableURL: URL(
+            fileURLWithPath:
+                "/Users/markoandruhiv/Documents/LocationChanger/.venv/bin/pymobiledevice3"
+        )
+    )
+    
     var body: some View {
         VStack(spacing: 16) {
             Text("Location Changer")
@@ -75,6 +83,20 @@ struct ContentView: View {
                 }
 
                 status = "Selected: \(lat), \(lon)"
+            }
+            Button("List connected devices") {
+                do {
+                    // Launch the command; its output appears in Xcode's console.
+                    _ = try deviceConnection.listDevices()
+                    status = "Device check launched — see Xcode console"
+                } catch {
+                    // Include the error domain, code, and underlying details.
+                    let details = error as NSError
+                    print("Device launch error:", details.domain, details.code)
+                    print("Details:", details.userInfo)
+
+                    status = "Couldn't launch device check: \(error.localizedDescription)"
+                }
             }
 
             Text(status)
