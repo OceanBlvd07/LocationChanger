@@ -5,223 +5,305 @@ import AppKit
 struct ContentView: View {
     @State private var latitude = ""
     @State private var longitude = ""
-    @State private var status = "Enter coordinates"
-    
-    // Stores the address or place name entered in the search field.
+    @State private var status = "Search, click the map, or enter coordinates"
+
     @State private var searchQuery = ""
-
-    // Controls which area the map displays.
-    @State private var cameraPosition: MapCameraPosition = .automatic
-
-    // Prevents multiple searches from running at once.
     @State private var isSearching = false
-    
-    // Tracks a launched session, not confirmation from the iPhone.
+
+    // Changing this requests that the native map center on the selection.
+    @State private var mapFocusRequest = UUID()
+
     @State private var hasSimulationSession = false
-
-    // Prevents overlapping commands while stopping.
-    @State private var isStopping = false
-    
-    // Prevent duplicate clicks while checking the connected device.
     @State private var isStarting = false
-    
-    // Use the shared connection instead of creating another one.
-    let deviceConnection: DeviceConnection
-    
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("Location Changer")
-                .font(.title)
-            Button("Choose backend…") {
-                chooseBackend()
-            }
-            // Keep the backend fixed while commands or cleanup are in progress.
-            .disabled(hasSimulationSession || isStarting || isStopping)
-            HStack {
-                TextField("Search for a place or address", text: $searchQuery)
+    @State private var isStopping = false
 
-                Button(isSearching ? "Searching…" : "Search") {
-                    Task {
-                        await searchLocation()
-                    }
+    let deviceConnection: DeviceConnection
+
+    // The fields remain the source of truth for the selected location.
+    private var selectedCoordinate: CLLocationCoordinate2D? {
+        guard let lat = Double(latitude),
+              let lon = Double(longitude),
+              lat.isFinite,
+              lon.isFinite,
+              (-90...90).contains(lat),
+              (-180...180).contains(lon) else {
+            return nil
+        }
+
+        return CLLocationCoordinate2D(
+            latitude: lat,
+            longitude: lon
+        )
+    }
+
+    var body: some View {
+        ZStack {
+            // The map fills the window behind the floating controls.
+            locationMap
+
+            GlassEffectContainer(spacing: 24) {
+                VStack(spacing: 20) {
+                    searchPanel
+
+                    // This area stays open for interacting with the map.
+                    Spacer(minLength: 100)
+
+                    selectionPanel
                 }
+                .padding(20)
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+        .frame(minWidth: 640, minHeight: 720)
+        .onAppear {
+            registerExitCallback()
+        }
+    }
+
+    // MARK: - Glass panels
+
+    private var searchPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Label(
+                    "Location Changer",
+                    systemImage: "location.fill"
+                )
+                .font(.headline)
+
+                Spacer()
+
+                Button {
+                    chooseBackend()
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .help("Choose backend")
                 .disabled(
-                    isSearching ||
-                    searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    hasSimulationSession ||
+                    isStarting ||
+                    isStopping
                 )
             }
-            // Gives us a proxy that converts screen positions into map coordinates.
-            MapReader { proxy in
-                Map(position: $cameraPosition) {
-                    // Show a pin only when both fields contain valid coordinates.
-                    if let lat = Double(latitude),
-                       let lon = Double(longitude),
-                       (-90...90).contains(lat),
-                       (-180...180).contains(lon) {
-                        Marker(
-                            "Selected location",
-                            coordinate: CLLocationCoordinate2D(
-                                latitude: lat,
-                                longitude: lon
-                            )
-                        )
-                    }
-                }
-                .onTapGesture { position in
-                    // Convert the click's position within the map to GPS coordinates.
-                    if let coordinate = proxy.convert(position, from: .local) {
-                        // Updating @State refreshes the fields and moves the pin.
-                        latitude = String(format: "%.6f", coordinate.latitude)
-                        longitude = String(format: "%.6f", coordinate.longitude)
-                    }
-                }
-            }
-            .frame(height: 280)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
 
-            TextField("Latitude", text: $latitude)
-            TextField("Longitude", text: $longitude)
+            searchControls
+        }
+        .padding(18)
+        // Apply glass after padding so it surrounds the entire panel.
+        .glassEffect(
+            .regular,
+            in: RoundedRectangle(cornerRadius: 24)
+        )
+    }
+
+    private var selectionPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Button("Start simulation") {
-                    guard let lat = Double(latitude),
-                          let lon = Double(longitude),
-                          lat.isFinite, lon.isFinite,
-                          (-90...90).contains(lat),
-                          (-180...180).contains(lon) else {
-                        status = "Enter valid coordinates"
-                        return
-                    }
+                Text("Selected location")
+                    .font(.headline)
 
-                    isStarting = true
-                    status = "Checking connected device…"
+                Spacer()
 
+                Button {
+                    centerOnSelection()
+                } label: {
+                    Image(systemName: "scope")
+                }
+                .help("Center on selected location")
+                .disabled(selectedCoordinate == nil)
+            }
+
+            coordinateFields
+
+            HStack {
+                simulationControls
+
+                Spacer()
+
+                Button {
                     Task {
-                        // Always re-enable controls when this attempt finishes.
-                        defer { isStarting = false }
-
-                        do {
-                            let devices = try await deviceConnection.listDevices()
-
-                            // Don't launch a simulation without a connected device.
-                            guard !devices.isEmpty else {
-                                status = "No device connected"
-                                return
-                            }
-
-                            // Require one device until explicit selection is implemented.
-                            guard devices.count == 1 else {
-                                status = "Connect only one device"
-                                return
-                            }
-
-                            try deviceConnection.startSimulation(
-                                latitude: lat,
-                                longitude: lon
-                            )
-
-                            hasSimulationSession = true
-                            status = "Simulation launched — verify in Maps"
-                        } catch {
-                            status = "Couldn't start: \(error.localizedDescription)"
-                        }
+                        await listDevices()
                     }
+                } label: {
+                    Image(systemName: "iphone")
                 }
-                .disabled(hasSimulationSession || isStarting || isStopping)
-
-                Button("Stop / restore location") {
-                    // Disable both buttons while the stop command is running.
-                    isStopping = true
-                    status = "Stopping simulation…"
-
-                    Task {
-                        defer { isStopping = false }
-
-                        do {
-                            try await deviceConnection.stopSimulation()
-
-                            hasSimulationSession = false
-                            status = "Clear completed — verify real location in Maps"
-                        } catch {
-                            // Keep Stop available so the user can retry.
-                            status = "Couldn't restore: \(error.localizedDescription)"
-                        }
-                    }
-                }
-                .disabled(!hasSimulationSession || isStopping)
+                .help("Check connected iPhone")
+                .disabled(isStarting || isStopping)
             }
-            Button("Check coordinates") {
-                guard let lat = Double(latitude),
-                      let lon = Double(longitude),
-                      lat.isFinite,
-                      lon.isFinite,
-                      (-90...90).contains(lat),
-                      (-180...180).contains(lon) else {
-                    status = "Enter valid coordinates"
-                    return
-                }
 
-                status = "Selected: \(lat), \(lon)"
-            }
-            Button("List connected devices") {
-                // Task lets the button call an asynchronous function.
-                Task {
-                    status = "Looking for an iPhone…"
-
-                    do {
-                        let devices = try await deviceConnection.listDevices()
-
-                        // Show the first device for this initial version.
-                        if let device = devices.first {
-                            status = "\(device.name) — iOS \(device.version)"
-                        } else {
-                            status = "No devices found. Connect and unlock your iPhone."
-                        }
-                    } catch {
-                        status = "Device check failed: \(error.localizedDescription)"
-                    }
-                }
-            }
+            Divider()
 
             Text(status)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .textFieldStyle(.roundedBorder)
-        .padding(24)
-        .frame(width: 600).onAppear {
-            // Register the callback when this screen appears.
-            deviceConnection.onSimulationExit = { exitCode in
-                // Stop handles its own status. Ignore notifications after cleanup.
-                guard hasSimulationSession, !isStopping else {
-                    return
-                }
+        .padding(18)
+        .glassEffect(
+            .regular,
+            in: RoundedRectangle(cornerRadius: 24)
+        )
+    }
 
-                // Process exit doesn't prove that the phone restored real GPS.
-                status = """
-                Simulation process ended (code \(exitCode)). \
-                Press Stop to attempt location cleanup.
-                """
+    // MARK: - Search controls
 
-                // Keep Stop available until cleanup succeeds.
-                hasSimulationSession = true
+    private var searchControls: some View {
+        HStack {
+            TextField(
+                "Search for a place or address",
+                text: $searchQuery
+            )
+            .onSubmit {
+                beginSearch()
+            }
+
+            Button(isSearching ? "Searching…" : "Search") {
+                beginSearch()
+            }
+            .disabled(
+                isSearching ||
+                searchQuery.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                ).isEmpty
+            )
+        }
+    }
+
+    private func beginSearch() {
+        guard !isSearching,
+              !searchQuery.trimmingCharacters(
+                in: .whitespacesAndNewlines
+              ).isEmpty else {
+            return
+        }
+
+        Task {
+            await searchLocation()
+        }
+    }
+
+    // MARK: - Native map
+
+    private var locationMap: some View {
+        // The native component handles marker dragging and map navigation.
+        LocationMapView(
+            latitude: $latitude,
+            longitude: $longitude,
+            focusRequest: mapFocusRequest
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Coordinate fields
+
+    private var coordinateFields: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Latitude")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField("−90 to 90", text: $latitude)
+                    .onSubmit {
+                        centerOnSelection()
+                    }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Longitude")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField("−180 to 180", text: $longitude)
+                    .onSubmit {
+                        centerOnSelection()
+                    }
             }
         }
     }
+
+    private func updateCoordinates(
+        _ coordinate: CLLocationCoordinate2D
+    ) {
+        // Keep decimal-point formatting independent of the Mac's region.
+        let locale = Locale(identifier: "en_US_POSIX")
+
+        latitude = String(
+            format: "%.7f",
+            locale: locale,
+            coordinate.latitude
+        )
+
+        longitude = String(
+            format: "%.7f",
+            locale: locale,
+            coordinate.longitude
+        )
+    }
+
+    private func centerOnSelection() {
+        guard selectedCoordinate != nil else {
+            status = "Enter valid coordinates using a decimal point"
+            return
+        }
+
+        // Ask the map to center without resetting it on every field edit.
+        mapFocusRequest = UUID()
+    }
+
+    // MARK: - Simulation controls
+
+    private var simulationControls: some View {
+        HStack {
+            Button(isStarting ? "Starting…" : "Start simulation") {
+                guard let coordinate = selectedCoordinate else {
+                    status = "Enter valid coordinates"
+                    return
+                }
+
+                // Capture the selected location before the device check.
+                isStarting = true
+
+                Task {
+                    await startSimulation(at: coordinate)
+                }
+            }
+            .disabled(
+                hasSimulationSession ||
+                isStarting ||
+                isStopping ||
+                selectedCoordinate == nil
+            )
+
+            Button(
+                isStopping ? "Stopping…" : "Stop / restore location"
+            ) {
+                isStopping = true
+
+                Task {
+                    await stopSimulation()
+                }
+            }
+            .disabled(!hasSimulationSession || isStopping)
+        }
+    }
+
+    // MARK: - Backend selection
+
     @MainActor
     private func chooseBackend() {
         let panel = NSOpenPanel()
-
         panel.title = "Choose pymobiledevice3"
-        panel.message = "Select the executable inside your project's .venv/bin folder."
+        panel.message = """
+        Select the executable inside your project's .venv/bin folder.
+        """
         panel.prompt = "Choose"
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-
-        // Python environments are usually inside a hidden .venv folder.
         panel.showsHiddenFiles = true
 
-        // Opening the picker does not execute the selected file.
         guard panel.runModal() == .OK,
               let url = panel.url else {
             return
@@ -234,41 +316,114 @@ struct ContentView: View {
             status = error.localizedDescription
         }
     }
+
+    // MARK: - Address search
+
     @MainActor
     private func searchLocation() async {
         isSearching = true
-
-        // Restore the button whether the search succeeds or fails.
         defer { isSearching = false }
 
         let searchService = LocationSearchService()
 
         do {
-            guard let result = try await searchService.search(query: searchQuery) else {
+            guard let result = try await searchService.search(
+                query: searchQuery
+            ) else {
                 status = "No places found"
                 return
             }
 
-            // Update the fields and pin using the returned location.
-            let coordinate = result.location.coordinate
-            latitude = String(format: "%.6f", coordinate.latitude)
-            longitude = String(format: "%.6f", coordinate.longitude)
-
-            // Move the map to the selected place.
-            cameraPosition = .region(
-                MKCoordinateRegion(
-                    center: coordinate,
-                    span: MKCoordinateSpan(
-                        latitudeDelta: 0.02,
-                        longitudeDelta: 0.02
-                    )
-                )
-            )
+            updateCoordinates(result.location.coordinate)
+            mapFocusRequest = UUID()
 
             status = "Selected: \(result.name ?? searchQuery)"
         } catch {
-            // Display errors passed back by the service.
             status = "Search failed: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Device discovery
+
+    @MainActor
+    private func listDevices() async {
+        status = "Looking for an iPhone…"
+
+        do {
+            let devices = try await deviceConnection.listDevices()
+
+            if let device = devices.first {
+                status = "\(device.name) — iOS \(device.version)"
+            } else {
+                status = "No devices found. Connect and unlock your iPhone."
+            }
+        } catch {
+            status = "Device check failed: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Session actions
+
+    @MainActor
+    private func startSimulation(
+        at coordinate: CLLocationCoordinate2D
+    ) async {
+        defer { isStarting = false }
+        status = "Checking connected device…"
+
+        do {
+            let devices = try await deviceConnection.listDevices()
+
+            guard !devices.isEmpty else {
+                status = "No device connected"
+                return
+            }
+
+            guard devices.count == 1 else {
+                status = "Connect only one device"
+                return
+            }
+
+            try deviceConnection.startSimulation(
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude
+            )
+
+            hasSimulationSession = true
+            status = "Simulation launched — verify in Maps"
+        } catch {
+            status = "Couldn't start: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func stopSimulation() async {
+        defer { isStopping = false }
+        status = "Stopping simulation…"
+
+        do {
+            try await deviceConnection.stopSimulation()
+
+            hasSimulationSession = false
+            status = "Clear completed — verify real location in Maps"
+        } catch {
+            // Keep Stop available when cleanup needs to be retried.
+            status = "Couldn't restore: \(error.localizedDescription)"
+        }
+    }
+
+    private func registerExitCallback() {
+        deviceConnection.onSimulationExit = { exitCode in
+            guard hasSimulationSession, !isStopping else {
+                return
+            }
+
+            status = """
+            Simulation process ended (code \(exitCode)). \
+            Press Stop to attempt location cleanup.
+            """
+
+            hasSimulationSession = true
         }
     }
 }
