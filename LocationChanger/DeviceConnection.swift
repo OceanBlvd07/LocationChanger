@@ -9,6 +9,9 @@ final class DeviceConnection {
 
     // Keep its input open while the simulation is running.
     private var simulationInput: Pipe?
+    // Notify the UI when the simulation command finishes.
+    // The integer is the process's exit code.
+    var onSimulationExit: (@MainActor @Sendable (Int32) -> Void)?
 
     // Classes need an explicit initializer for this stored property.
     init(executableURL: URL) {
@@ -98,14 +101,18 @@ final class DeviceConnection {
         process.standardOutput = FileHandle.standardOutput
         process.standardError = FileHandle.standardError
         
-        // Report when the command exits, including failed connection attempts.
+        // Capture the callback before entering the background termination handler.
+        let exitCallback = onSimulationExit
+
         process.terminationHandler = { finishedProcess in
-            print(
-                "SIMULATION EXIT:",
-                finishedProcess.terminationStatus,
-                "REASON:",
-                finishedProcess.terminationReason
-            )
+            let exitCode = finishedProcess.terminationStatus
+
+            print("SIMULATION EXIT:", exitCode)
+
+            // UI-related callbacks must run on the main actor.
+            Task { @MainActor in
+                exitCallback?(exitCode)
+            }
         }
         try process.run()
 

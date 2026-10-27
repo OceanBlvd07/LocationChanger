@@ -187,7 +187,24 @@ struct ContentView: View {
         }
         .textFieldStyle(.roundedBorder)
         .padding(24)
-        .frame(width: 600)
+        .frame(width: 600).onAppear {
+            // Register the callback when this screen appears.
+            deviceConnection.onSimulationExit = { exitCode in
+                // Stop handles its own status. Ignore notifications after cleanup.
+                guard hasSimulationSession, !isStopping else {
+                    return
+                }
+
+                // Process exit doesn't prove that the phone restored real GPS.
+                status = """
+                Simulation process ended (code \(exitCode)). \
+                Press Stop to attempt location cleanup.
+                """
+
+                // Keep Stop available until cleanup succeeds.
+                hasSimulationSession = true
+            }
+        }
     }
     @MainActor
     private func searchLocation() async {
