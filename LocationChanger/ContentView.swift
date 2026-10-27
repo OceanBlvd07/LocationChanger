@@ -15,8 +15,17 @@ struct ContentView: View {
     // Prevents multiple searches from running at once.
     @State private var isSearching = false
     
-    // Points to the Python tool installed in this project's environment.
-    private let deviceConnection = DeviceConnection(
+    // Tracks a launched session, not confirmation from the iPhone.
+    @State private var hasSimulationSession = false
+
+    // Prevents overlapping commands while stopping.
+    @State private var isStopping = false
+    
+    // Prevent duplicate clicks while checking the connected device.
+    @State private var isStarting = false
+    
+    // Preserve the same connection object when SwiftUI updates the view.
+    @State private var deviceConnection = DeviceConnection(
         executableURL: URL(
             fileURLWithPath:
                 "/Users/markoandruhiv/Documents/LocationChanger/.venv/bin/pymobiledevice3"
@@ -71,6 +80,74 @@ struct ContentView: View {
 
             TextField("Latitude", text: $latitude)
             TextField("Longitude", text: $longitude)
+            HStack {
+                Button("Start simulation") {
+                    guard let lat = Double(latitude),
+                          let lon = Double(longitude),
+                          lat.isFinite, lon.isFinite,
+                          (-90...90).contains(lat),
+                          (-180...180).contains(lon) else {
+                        status = "Enter valid coordinates"
+                        return
+                    }
+
+                    isStarting = true
+                    status = "Checking connected device…"
+
+                    Task {
+                        // Always re-enable controls when this attempt finishes.
+                        defer { isStarting = false }
+
+                        do {
+                            let devices = try await deviceConnection.listDevices()
+
+                            // Don't launch a simulation without a connected device.
+                            guard !devices.isEmpty else {
+                                status = "No device connected"
+                                return
+                            }
+
+                            // Require one device until explicit selection is implemented.
+                            guard devices.count == 1 else {
+                                status = "Connect only one device"
+                                return
+                            }
+
+                            try deviceConnection.startSimulation(
+                                latitude: lat,
+                                longitude: lon
+                            )
+
+                            hasSimulationSession = true
+                            status = "Simulation launched — verify in Maps"
+                        } catch {
+                            status = "Couldn't start: \(error.localizedDescription)"
+                        }
+                    }
+                }
+                .disabled(hasSimulationSession || isStarting || isStopping)
+
+                Button("Stop / restore location") {
+                    // Disable both buttons while the stop command is running.
+                    isStopping = true
+                    status = "Stopping simulation…"
+
+                    Task {
+                        defer { isStopping = false }
+
+                        do {
+                            try await deviceConnection.stopSimulation()
+
+                            hasSimulationSession = false
+                            status = "Clear completed — verify real location in Maps"
+                        } catch {
+                            // Keep Stop available so the user can retry.
+                            status = "Couldn't restore: \(error.localizedDescription)"
+                        }
+                    }
+                }
+                .disabled(!hasSimulationSession || isStopping)
+            }
             Button("Check coordinates") {
                 guard let lat = Double(latitude),
                       let lon = Double(longitude),
