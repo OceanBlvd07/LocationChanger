@@ -17,6 +17,12 @@ struct ContentView: View {
     @State private var hasSimulationSession = false
     @State private var isStarting = false
     @State private var isStopping = false
+    
+    // Store all discovered connections, including USB and Wi-Fi entries.
+    @State private var discoveredDevices: [ConnectedDevice] = []
+
+    // A timestamp makes it clear that discovery is a snapshot.
+    @State private var lastDeviceCheck: Date?
 
     let deviceConnection: DeviceConnection
 
@@ -67,7 +73,7 @@ struct ContentView: View {
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             sidebarHeader
-                .padding(.bottom, 24)
+                .padding(.bottom, 20)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
@@ -100,17 +106,21 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.bottom, 16)
+                // Leave space inside the scroll area for field focus rings.
+                .padding(.horizontal, 6)
+                .padding(.vertical, 8)
             }
-
-            Spacer(minLength: 16)
+            // Keep scrolling content inside its allocated area.
+            .scrollClipDisabled(false)
+            .padding(.horizontal, -6)
 
             Divider()
+                .padding(.top, 16)
                 .padding(.bottom, 16)
 
+            // The device section stays outside the scrolling content.
             deviceControls
         }
-        .scrollClipDisabled()
         .padding(20)
         .frame(width: 320)
         .frame(maxHeight: .infinity)
@@ -345,6 +355,66 @@ struct ContentView: View {
 
     private var deviceControls: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let checkedAt = lastDeviceCheck {
+                if discoveredDevices.isEmpty {
+                    Label(
+                        "No device found",
+                        systemImage: "iphone.slash"
+                    )
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                } else {
+                    // Show each discovered connection without assuming
+                    // that discovery confirms an active simulation transport.
+                    ForEach(discoveredDevices.indices, id: \.self) { index in
+                        let device = discoveredDevices[index]
+
+                        HStack(spacing: 10) {
+                            Image(systemName: device.connectionSymbol)
+                                .font(.title3)
+                                .foregroundStyle(.tint)
+                                .frame(width: 24)
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(device.name)
+                                    .font(.subheadline.weight(.medium))
+                                    .lineLimit(1)
+                                    .help(device.name)
+
+                                Text("iOS \(device.version)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer(minLength: 4)
+
+                            Text(device.connectionLabel)
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(
+                                    Color.accentColor.opacity(0.12),
+                                    in: Capsule()
+                                )
+                        }
+                    }
+                }
+
+                HStack(spacing: 4) {
+                    Text("Last checked")
+                    Text(checkedAt, style: .time)
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            } else {
+                Label(
+                    "Connection not checked",
+                    systemImage: "iphone"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
             Button {
                 isCheckingDevices = true
 
@@ -353,8 +423,8 @@ struct ContentView: View {
                 }
             } label: {
                 Label(
-                    isCheckingDevices ? "Checking…" : "Check connected iPhone",
-                    systemImage: "iphone"
+                    isCheckingDevices ? "Checking…" : "Refresh connection",
+                    systemImage: "arrow.clockwise"
                 )
                 .frame(maxWidth: .infinity)
             }
@@ -433,12 +503,19 @@ struct ContentView: View {
         do {
             let devices = try await deviceConnection.listDevices()
 
-            if let device = devices.first {
-                status = "\(device.name) — iOS \(device.version)"
+            // Refresh the displayed discovery snapshot.
+            discoveredDevices = devices
+            lastDeviceCheck = Date()
+
+            if devices.isEmpty {
+                status = "No devices found. Check USB or Wi-Fi connectivity."
             } else {
-                status = "No devices found. Connect and unlock your iPhone."
+                status = "Device discovery completed"
             }
         } catch {
+            // Don't leave an older connection displayed as a fresh result.
+            discoveredDevices = []
+            lastDeviceCheck = nil
             status = "Device check failed: \(error.localizedDescription)"
         }
     }
@@ -454,13 +531,15 @@ struct ContentView: View {
 
         do {
             let devices = try await deviceConnection.listDevices()
+            discoveredDevices = devices
+            lastDeviceCheck = Date()
 
             guard !devices.isEmpty else {
                 status = "No device connected"
                 return
             }
 
-            guard devices.count == 1 else {
+            guard Set(devices.map(\.identifier)).count == 1 else {
                 status = "Connect only one device"
                 return
             }
