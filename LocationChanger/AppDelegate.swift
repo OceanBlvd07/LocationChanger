@@ -12,6 +12,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
+        // An existing quit request already owns its cleanup task.
+        if isHandlingQuit {
+            return .terminateLater
+        }
+
+        // Don't begin quitting while Start or the UI's Stop is in progress.
+        // Finish the operation, then request Quit again.
+        if deviceConnection.state.isBusy {
+            return .terminateCancel
+        }
         // Quit immediately when no cleanup is needed.
         guard deviceConnection.needsCleanup else {
             return .terminateNow

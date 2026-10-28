@@ -2,6 +2,7 @@ import SwiftUI
 import MapKit
 import AppKit
 
+@MainActor
 struct ContentView: View {
     @State private var latitude = ""
     @State private var longitude = ""
@@ -11,20 +12,52 @@ struct ContentView: View {
     @State private var isSearching = false
     @State private var isCheckingDevices = false
 
-    // Change this to request centering on the selected coordinates.
+
+
+    // Changing this requests centering on the selected location.
     @State private var mapFocusRequest = UUID()
 
-    @State private var hasSimulationSession = false
-    @State private var isStarting = false
-    @State private var isStopping = false
-    
-    // Store all discovered connections, including USB and Wi-Fi entries.
+    // Discovery is a snapshot, not continuous connection monitoring.
     @State private var discoveredDevices: [ConnectedDevice] = []
-
-    // A timestamp makes it clear that discovery is a snapshot.
     @State private var lastDeviceCheck: Date?
 
     let deviceConnection: DeviceConnection
+
+    // MARK: - Shared session state
+
+    private var hasSimulationSession: Bool {
+        switch deviceConnection.state {
+        case .running, .stopping, .cleanupRequired:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private var isStopping: Bool {
+        deviceConnection.state == .stopping
+    }
+    
+    private var isStarting: Bool {
+        deviceConnection.state == .starting
+    }
+    
+    private var sessionStatus: String {
+        if isStarting {
+            return "Checking device…"
+        }
+
+        return deviceConnection.state.title
+    }
+
+    private var backendControlsDisabled: Bool {
+        hasSimulationSession ||
+        deviceConnection.state.isBusy ||
+        isStarting ||
+        isCheckingDevices
+    }
+
+    // MARK: - Selected location
 
     private var selectedCoordinate: CLLocationCoordinate2D? {
         guard let lat = Double(latitude),
@@ -42,29 +75,32 @@ struct ContentView: View {
         )
     }
 
-    private var sessionStatus: String {
-        if isStopping {
-            return "Stopping"
-        }
-
-        if isStarting {
-            return "Starting"
-        }
-
-        return hasSimulationSession ? "Session launched" : "Ready"
-    }
+    // MARK: - Main layout
 
     var body: some View {
         ZStack(alignment: .leading) {
-            // Leave the map visible behind the glass sidebar.
             locationMap
 
             sidebar
                 .padding(16)
         }
         .frame(minWidth: 900, minHeight: 660)
-        .onAppear {
-            registerExitCallback()
+        .onChange(
+            of: deviceConnection.state,
+            initial: true
+        ) { _, newState in
+            // The backend owns session transitions.
+            // The view only displays their recovery or failure messages.
+            switch newState {
+            case .cleanupRequired(let message):
+                status = message
+
+            case .failed(let message):
+                status = "Couldn't start: \(message)"
+
+            default:
+                break
+            }
         }
     }
 
@@ -106,11 +142,11 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 }
-                // Leave space inside the scroll area for field focus rings.
+                // Leave room for the fields' borders and focus rings.
                 .padding(.horizontal, 6)
                 .padding(.vertical, 8)
             }
-            // Keep scrolling content inside its allocated area.
+            // Prevent scrolling content from overlapping the device section.
             .scrollClipDisabled(false)
             .padding(.horizontal, -6)
 
@@ -118,7 +154,6 @@ struct ContentView: View {
                 .padding(.top, 16)
                 .padding(.bottom, 16)
 
-            // The device section stays outside the scrolling content.
             deviceControls
         }
         .padding(20)
@@ -155,12 +190,7 @@ struct ContentView: View {
                 Image(systemName: "gearshape")
             }
             .help("Choose backend")
-            .disabled(
-                hasSimulationSession ||
-                isStarting ||
-                isStopping ||
-                isCheckingDevices
-            )
+            .disabled(backendControlsDisabled)
         }
     }
 
@@ -171,13 +201,10 @@ struct ContentView: View {
             Text("Search")
                 .font(.subheadline.weight(.semibold))
 
-            TextField(
-                "Place or address",
-                text: $searchQuery
-            )
-            .onSubmit {
-                beginSearch()
-            }
+            TextField("Place or address", text: $searchQuery)
+                .onSubmit {
+                    beginSearch()
+                }
 
             Button {
                 beginSearch()
@@ -211,6 +238,8 @@ struct ContentView: View {
             return
         }
 
+        isSearching = true
+
         Task {
             await searchLocation()
         }
@@ -224,7 +253,6 @@ struct ContentView: View {
             longitude: $longitude,
             focusRequest: mapFocusRequest
         )
-        // Reserve room for the sidebar so centered markers aren't hidden.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.background)
     }
@@ -265,7 +293,7 @@ struct ContentView: View {
     private func updateCoordinates(
         _ coordinate: CLLocationCoordinate2D
     ) {
-        // Always use a decimal point when formatting coordinates.
+        // Keep decimal-point formatting independent of regional settings.
         let locale = Locale(identifier: "en_US_POSIX")
 
         latitude = String(
@@ -298,13 +326,16 @@ struct ContentView: View {
                 .font(.subheadline.weight(.semibold))
 
             Button {
+                guard deviceConnection.state.canStart,
+                      !isStarting,
+                      !isCheckingDevices else {
+                    return
+                }
+
                 guard let coordinate = selectedCoordinate else {
                     status = "Enter valid coordinates"
                     return
                 }
-
-                // Capture the selection before checking the device.
-                isStarting = true
 
                 Task {
                     await startSimulation(at: coordinate)
@@ -319,16 +350,14 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .disabled(
-                hasSimulationSession ||
+                !deviceConnection.state.canStart ||
                 isStarting ||
-                isStopping ||
                 isCheckingDevices ||
                 selectedCoordinate == nil
             )
 
             Button {
-                isStopping = true
-
+                // The backend sets .stopping and guards against duplicates.
                 Task {
                     await stopSimulation()
                 }
@@ -340,7 +369,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity)
             }
             .controlSize(.large)
-            .disabled(!hasSimulationSession || isStopping)
+            .disabled(!deviceConnection.state.canStop)
 
             if hasSimulationSession {
                 Text("Changing the selection won't update this session.")
@@ -351,7 +380,7 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Device and status
+    // MARK: - Device and connection status
 
     private var deviceControls: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -364,8 +393,6 @@ struct ContentView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 } else {
-                    // Show each discovered connection without assuming
-                    // that discovery confirms an active simulation transport.
                     ForEach(discoveredDevices.indices, id: \.self) { index in
                         let device = discoveredDevices[index]
 
@@ -416,6 +443,12 @@ struct ContentView: View {
             }
 
             Button {
+                guard !isCheckingDevices,
+                      !isStarting,
+                      !deviceConnection.state.isBusy else {
+                    return
+                }
+
                 isCheckingDevices = true
 
                 Task {
@@ -428,7 +461,11 @@ struct ContentView: View {
                 )
                 .frame(maxWidth: .infinity)
             }
-            .disabled(isCheckingDevices || isStarting || isStopping)
+            .disabled(
+                isCheckingDevices ||
+                isStarting ||
+                deviceConnection.state.isBusy
+            )
 
             Text(status)
                 .font(.caption)
@@ -441,8 +478,11 @@ struct ContentView: View {
 
     // MARK: - Backend selection
 
-    @MainActor
     private func chooseBackend() {
+        guard !backendControlsDisabled else {
+            return
+        }
+
         let panel = NSOpenPanel()
         panel.title = "Choose pymobiledevice3"
         panel.message = """
@@ -469,9 +509,7 @@ struct ContentView: View {
 
     // MARK: - Address search
 
-    @MainActor
     private func searchLocation() async {
-        isSearching = true
         defer { isSearching = false }
 
         let searchService = LocationSearchService()
@@ -486,7 +524,6 @@ struct ContentView: View {
 
             updateCoordinates(result.location.coordinate)
             mapFocusRequest = UUID()
-
             status = "Selected: \(result.name ?? searchQuery)"
         } catch {
             status = "Search failed: \(error.localizedDescription)"
@@ -495,7 +532,6 @@ struct ContentView: View {
 
     // MARK: - Device discovery
 
-    @MainActor
     private func listDevices() async {
         defer { isCheckingDevices = false }
         status = "Looking for an iPhone…"
@@ -503,17 +539,14 @@ struct ContentView: View {
         do {
             let devices = try await deviceConnection.listDevices()
 
-            // Refresh the displayed discovery snapshot.
             discoveredDevices = devices
             lastDeviceCheck = Date()
 
-            if devices.isEmpty {
-                status = "No devices found. Check USB or Wi-Fi connectivity."
-            } else {
-                status = "Device discovery completed"
-            }
+            status = devices.isEmpty
+                ? "No devices found. Check USB or Wi-Fi connectivity."
+                : "Device discovery completed"
         } catch {
-            // Don't leave an older connection displayed as a fresh result.
+            // Don't show an old snapshot as a fresh result.
             discoveredDevices = []
             lastDeviceCheck = nil
             status = "Device check failed: \(error.localizedDescription)"
@@ -522,68 +555,47 @@ struct ContentView: View {
 
     // MARK: - Session actions
 
-    @MainActor
     private func startSimulation(
         at coordinate: CLLocationCoordinate2D
     ) async {
-        defer { isStarting = false }
-        status = "Checking connected device…"
+        guard deviceConnection.state.canStart else {
+            return
+        }
+
+        status = "Checking device and starting simulation…"
 
         do {
-            let devices = try await deviceConnection.listDevices()
-            discoveredDevices = devices
-            lastDeviceCheck = Date()
-
-            guard !devices.isEmpty else {
-                status = "No device connected"
-                return
-            }
-
-            guard Set(devices.map(\.identifier)).count == 1 else {
-                status = "Connect only one device"
-                return
-            }
-
-            try deviceConnection.startSimulation(
+            // The backend now owns discovery, validation, and session state.
+            let devices = try await deviceConnection.startSimulation(
                 latitude: coordinate.latitude,
                 longitude: coordinate.longitude
             )
 
-            hasSimulationSession = true
+            discoveredDevices = devices
+            lastDeviceCheck = Date()
             status = "Simulation launched — verify in Maps"
         } catch {
+            // Clear the old snapshot when starting couldn't be completed.
+            discoveredDevices = []
+            lastDeviceCheck = nil
             status = "Couldn't start: \(error.localizedDescription)"
         }
     }
-
-    @MainActor
     private func stopSimulation() async {
-        defer { isStopping = false }
+        guard deviceConnection.state.canStop else {
+            return
+        }
+
         status = "Stopping simulation…"
 
         do {
             try await deviceConnection.stopSimulation()
 
-            hasSimulationSession = false
+            // No local flags to reset: the backend transitions to .idle.
             status = "Clear completed — verify real location in Maps"
         } catch {
-            // Keep recovery available if clearing fails.
+            // The backend preserves .cleanupRequired when cleanup fails.
             status = "Couldn't restore: \(error.localizedDescription)"
-        }
-    }
-
-    private func registerExitCallback() {
-        deviceConnection.onSimulationExit = { exitCode in
-            guard hasSimulationSession, !isStopping else {
-                return
-            }
-
-            status = """
-            Simulation process ended (code \(exitCode)). \
-            Press Stop to attempt location cleanup.
-            """
-
-            hasSimulationSession = true
         }
     }
 }
