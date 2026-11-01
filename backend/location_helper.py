@@ -9,6 +9,7 @@ from pymobiledevice3.services.dvt.instruments.dvt_provider import DvtProvider
 from pymobiledevice3.services.dvt.instruments.location_simulation import (
     LocationSimulation,
 )
+from pymobiledevice3.services.dvt.instruments.device_info import DeviceInfo
 
 
 def parse_arguments():
@@ -51,7 +52,8 @@ async def run_simulation(args):
             autopair=False,
         ) as rsd:
             async with DvtProvider(rsd) as dvt:
-                async with LocationSimulation(dvt) as location:
+                # Both services share the same developer connection.
+                async with LocationSimulation(dvt) as location, DeviceInfo(dvt) as info:
                     # If Stop was requested during setup, don't start.
                     if stop_requested.is_set():
                         print("Stopped before simulation started.", flush=True)
@@ -68,7 +70,22 @@ async def run_simulation(args):
 
                         # Unlike signal.sigwait(), this yields control.
                         # The same event loop can keep processing the tunnel.
-                        await stop_requested.wait()
+                       # Probe the existing developer connection without resetting location.
+                        while not stop_requested.is_set():
+                            try:
+                                await asyncio.wait_for(
+                                    stop_requested.wait(),
+                                    timeout=5,
+                                )
+                            except asyncio.TimeoutError:
+                                print("Checking existing developer connection…", flush=True)
+
+                                await asyncio.wait_for(
+                                    info.mach_kernel_name(),
+                                    timeout=3,
+                                )
+
+                                print("Existing developer connection responded.", flush=True)
                     finally:
                         # Clear while the original developer connection
                         # and location service are still open.
@@ -78,6 +95,14 @@ async def run_simulation(args):
                             location.clear(),
                             timeout=10,
                         )
+                        # Complete another round trip before closing the developer connection.
+                        # This checks responsiveness; it is not confirmation of GPS restoration.
+                        await asyncio.wait_for(
+                            info.mach_kernel_name(),
+                            timeout=3,
+                        )
+
+                        print("Developer connection responded after clear.", flush=True)
 
                         # This is command completion, not GPS verification.
                         print(
