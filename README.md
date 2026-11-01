@@ -4,7 +4,7 @@
 
 A native macOS interface for simulating an iPhone's location through its developer services. Find a place, drag a marker to refine the coordinates, and start a simulation from a Liquid Glass sidebar.
 
-Built with **SwiftUI, AppKit, and MapKit**, with **pymobiledevice3** providing the local connection to the iPhone.
+Built with **SwiftUI, AppKit, and MapKit**, with a repository-owned **asynchronous Python helper** using **pymobiledevice3** for the local connection to the iPhone.
 
 > **Project status:** working developer prototype with USB and Wi-Fi operation tested through an iPhone Personal Hotspot. Build with Xcode, then run the built app directly if desired. A separately installed Python backend is still required; a self-contained distribution is not provided.
 
@@ -39,7 +39,10 @@ Built with **SwiftUI, AppKit, and MapKit**, with **pymobiledevice3** providing t
 - USB and Wi-Fi discovery badges, device details, and a last-checked timestamp.
 - Wireless operation on reachable local networks, tested using an iPhone Personal Hotspot.
 - A scrollable control area with a separate device-status section.
-- Start simulation and explicit location-clear commands.
+- Asynchronous location helper with an explicitly managed userspace tunnel.
+- Shared observable session state for the interface and quit handler.
+- Signal-driven cleanup through the same developer connection used by the simulation.
+- A post-clear connection round trip before teardown, manually tested across repeated sessions.
 - Time-limited waits during shutdown.
 - Process-exit notifications.
 - Cleanup retry after reconnecting a device.
@@ -111,17 +114,17 @@ From the repository root:
 
 ```sh
 python3.13 -m venv .venv
-.venv/bin/python -m pip install pymobiledevice3
+.venv/bin/python -m pip install -r backend/requirements.txt
 .venv/bin/pymobiledevice3 --help
 ```
 
-To reproduce the backend version used during development instead of installing the latest release:
+The requirements file pins the tested backend to `11.45.0`. For reference, the equivalent direct installation is:
 
 ```sh
 .venv/bin/python -m pip install 'pymobiledevice3==11.45.0'
 ```
 
-Choose one installation approach. Backend behavior may change between versions; record the installed version when reporting problems:
+Use the requirements-file installation for this project. Backend behavior may change between versions; record the installed version when reporting problems:
 
 ```sh
 .venv/bin/python -m pip show pymobiledevice3
@@ -196,6 +199,8 @@ Click the gear button in the sidebar. Select:
 Select the executable file, not the Python interpreter or the `.venv` directory. The picker displays hidden files. You can also press **⌘⇧G** in the picker and enter the full path.
 
 The selection is stored locally and restored on subsequent launches. Choose it again if you move, delete, or recreate the environment at a different path.
+
+**Keep the documented repository layout.** Swift finds `python` beside the selected executable, then finds `backend/location_helper.py` relative to the `.venv` directory. An arbitrary system-wide `pymobiledevice3` installation is not sufficient for helper discovery. The app uses the virtual-environment Python path without resolving its symlink, preserving that environment’s package selection.
 
 Click **Refresh connection** to verify that the UI can invoke the selected backend.
 
@@ -340,16 +345,29 @@ This is local use of a development build, not a signed and notarized installer w
 
 ### Shutdown sequence
 
-The current backend wrapper:
+The normal path is now owned by the Python helper:
 
-1. Sends an interrupt to the simulation process.
-2. Waits up to three seconds.
-3. Requests termination if necessary and waits up to three more seconds.
-4. Attempts the separate `clear` command even if the original process did not exit.
-5. Waits up to twenty seconds for that command.
-6. Checks both the clear command's exit status and whether the original process remains alive.
+1. Swift changes the shared state to `stopping` and sends SIGINT to the helper.
+2. The helper's signal handler sets an `asyncio.Event`, allowing network processing to continue.
+3. The helper requests `location.clear()` through the existing location service, with a ten-second timeout.
+4. It requests `DeviceInfo.mach_kernel_name()` over the same DVT connection, with a three-second timeout, before closing the connection.
+5. The helper exits its service and tunnel contexts, then exits the process.
+6. Swift checks that the helper exited normally with code zero before releasing session references and returning to `idle`.
 
-Session references and the cleanup-needed flag are reset only after those checks succeed. These bounds prevent indefinite waits in the implemented shutdown checks; they do not guarantee all processes or device operations have stopped after a timeout.
+Swift allows twenty seconds for the initial helper shutdown. If the process remains alive, it sends SIGTERM and waits up to five more seconds. If the helper still runs, Stop reports an error instead of opening a competing recovery connection.
+
+If the helper has exited unsuccessfully, Swift attempts a separate CLI `clear` command, with a twenty-second wait limit. That recovery command currently uses automatic device selection. It is not a substitute for keeping the intended phone reachable, and explicit device targeting on the recovery path remains unfinished.
+
+**A successful helper exit or post-clear query does not independently verify real GPS restoration.** The query confirms another developer-service response; it is not an acknowledgment from the location service that GPS recovery is complete. Check the phone after every test.
+
+### Repeated-session cleanup finding
+
+During development, the first simulation could work while a second Start after Stop failed to hold, even though device-information queries continued to respond. The failure also reproduced with the helper launched directly from Terminal, so Swift was not required to trigger it.
+
+Adding the post-clear DVT round trip before teardown was followed by successful repeated-session testing in Terminal and in the app. This supports a cleanup-ordering hypothesis, but does not establish the exact internal iOS cause or guarantee behavior across versions. The implementation does not repeatedly reapply coordinates to conceal a reset.
+
+The helper also performs a device-information query roughly every five seconds while waiting for Stop, with a three-second response timeout. This checks the existing developer connection; it does not confirm that location simulation remains active. A probe failure leaves the wait loop and attempts cleanup through `finally`.
+
 
 ### Losing the active connection
 
@@ -367,7 +385,7 @@ Closing a window is not necessarily the same as quitting a macOS app. The implem
 
 **Xcode Stop, Force Quit, crashes, and abrupt shutdown can bypass normal quit handling.** Do not assume that ending the desktop app clears the phone's simulated location.
 
-Avoid pressing Stop and Quit simultaneously: serialization between those cleanup paths remains unfinished.
+If a quit cleanup task already exists, subsequent quit requests reuse the pending termination flow. While Start or a UI-triggered Stop is busy, a new Quit request is canceled; finish the operation and request Quit again. Backend state guards prevent another Start or Stop from entering an incompatible session state. This is operation exclusion, not a queue that automatically retries commands.
 
 ### Recovery
 
@@ -400,7 +418,9 @@ Selected coordinates
         │
 DeviceConnection → Foundation.Process
         │
-Locally installed pymobiledevice3
+.venv/bin/python backend/location_helper.py
+        │
+pymobiledevice3 userspace tunnel + DVT services
         │
 USB or local Wi-Fi transport
         │
@@ -417,22 +437,49 @@ iPhone developer services
 - Physical devices are counted by identifier so duplicate USB and Wi-Fi discovery entries do not prevent startup.
 - Blocking discovery and shutdown work runs in background tasks; UI updates return to the main actor.
 
-The native interface is Swift. The iPhone transport and developer protocol implementation are supplied by Python, not reimplemented in Swift.
+The native interface and process orchestration are Swift. The repository-owned Python helper manages the asynchronous simulation lifecycle; the dependency supplies the iPhone transport and developer protocols.
 
-### Backend commands
+### Shared session state
+
+`DeviceConnection` is `@MainActor` and `@Observable`. Its state is read by both `ContentView` and `AppDelegate`:
+
+| State | Meaning |
+| --- | --- |
+| `idle` | No retained session needs cleanup |
+| `starting` | Validating input, discovering the device, or launching the helper |
+| `running` | Helper process launched; not device-side confirmation of simulated GPS |
+| `stopping` | One shutdown operation owns cleanup |
+| `cleanupRequired(message)` | Recovery is required before another Start |
+| `failed(message)` | Startup failed before a session was retained; another Start is allowed |
+
+`needsCleanup` is derived from this state instead of stored as another flag. Unexpected helper exits preserve a cleanup-required state. Process-identity checks ignore delayed exit notifications from older sessions.
+
+### Helper commands
+
+Run the current helper from the repository root, without the app or another simulation controller running:
 
 ```sh
-# Discover connected devices.
-pymobiledevice3 usbmux list
-
-# Start a fixed location simulation.
-pymobiledevice3 developer dvt simulate-location set -- LATITUDE LONGITUDE
-
-# Request removal of a simulated location.
-pymobiledevice3 developer dvt simulate-location clear
+.venv/bin/python backend/location_helper.py 43.6426 -79.3871
 ```
 
-In the tested backend version, the set command waits for **SIGINT or SIGTERM**. Sending a newline to stdin is not the stop mechanism. The Swift wrapper retains an input pipe, but uses process signals for shutdown.
+For explicit device selection:
+
+```sh
+.venv/bin/python backend/location_helper.py --udid YOUR_DEVICE_UDID -- 43.6426 -79.3871
+```
+
+Press **Ctrl+C once** to request cleanup. Wait for the Terminal prompt to return and verify real location before starting the next session. SIGTERM also requests graceful cleanup; Force Quit does not.
+
+Swift uses this helper for Start and passes the discovered device identifier. Discovery and fallback recovery still invoke the CLI:
+
+```sh
+.venv/bin/pymobiledevice3 usbmux list
+.venv/bin/pymobiledevice3 developer dvt simulate-location clear
+```
+
+The helper explicitly manages `UserspaceRsdTunnel`, `DvtProvider`, `LocationSimulation`, and `DeviceInfo`. It requires existing pairing (`autopair=False`) and does not require a separately running `sudo tunneld` for the tested workflow. Its asynchronous wait lets the tunnel continue processing traffic. It does not modify the installed dependency.
+
+The dependency's tested CLI `set` command uses a blocking signal wait. That was one investigated failure mechanism, not a complete explanation of every observed reset; the repeat-session cleanup change is documented separately above.
 
 ## Project structure
 
@@ -442,6 +489,10 @@ LocationChanger/
 │   └── workflows/
 │       └── build.yml
 ├── .gitignore
+├── README.md
+├── backend/
+│   ├── location_helper.py
+│   └── requirements.txt
 ├── LocationChanger.xcodeproj/
 │   └── xcshareddata/xcschemes/LocationChanger.xcscheme
 └── LocationChanger/
@@ -451,6 +502,7 @@ LocationChanger/
     ├── LocationMapView.swift
     ├── LocationSearch.swift
     ├── DeviceConnection.swift
+    ├── SimulationState.swift
     ├── ConnectedDevice.swift
     └── Assets.xcassets/
 ```
@@ -462,7 +514,10 @@ LocationChanger/
 | `ContentView.swift` | Sidebar, view state, search actions, device actions, and status messages |
 | `LocationMapView.swift` | Native map wrapper, annotation dragging, coordinate bindings, and recenter requests |
 | `LocationSearch.swift` | Contains `LocationSearchService`, which performs MapKit search |
-| `DeviceConnection.swift` | Backend selection, discovery, process lifecycle, and clear commands |
+| `DeviceConnection.swift` | Shared observable session state, backend discovery, helper launch, and shutdown/recovery orchestration |
+| `SimulationState.swift` | Session lifecycle cases and allowed-action rules |
+| `backend/location_helper.py` | Asynchronous tunnel, simulation, signal handling, connection probes, and same-connection cleanup |
+| `backend/requirements.txt` | Pinned Python backend dependency |
 | `ConnectedDevice.swift` | Decodable device fields and USB / Wi-Fi display labels and symbols |
 | `build.yml` | GitHub Actions build workflow |
 
@@ -544,6 +599,10 @@ Before describing a change as working, check the relevant paths:
 - A connected session can be started and cleared, with real location verified on the phone.
 - Cleanup can be retried after reconnecting.
 - Normal quitting attempts cleanup and cancels quitting on failure.
+- Stop followed by a second and third Start continues to hold the selected location.
+- Repeated sessions work with both direct helper invocation and the Swift interface.
+- Helper shutdown reaches the post-clear round-trip message and the process exits.
+- Start or Stop in progress prevents competing session operations and cancels a new Quit request.
 
 Some behaviors were manually exercised during development; this list is a regression checklist, not evidence of automated test coverage.
 
@@ -589,6 +648,14 @@ This is expected when two discovery routes are available. The sidebar displays b
 
 It is a last-checked snapshot. Click **Refresh connection** and inspect the timestamp. Continuous connection monitoring is not implemented.
 
+### The first session works, but the next one does not hold
+
+Use the current helper, including its post-clear `info.mach_kernel_name()` query. Verify that the previous process has exited before restarting; the “Clear command sent” message alone is not process termination. Compare two consecutive helper sessions in Terminal with two in the app. Keep other simulation apps and manual controllers closed. Record the reset time and whether the developer connection still responds; do not assume that a live process or successful information query proves active location simulation.
+
+### The tunnel closes and cleanup reports a closed DTX channel
+
+The helper cannot clear through a connection that has already been lost. Restore reachability, then retry Stop so the app can use its separate recovery command. Check USB/network discovery independently. A `userspace tunnel transport closed` message is evidence of a transport loss; it does not alone identify whether the cause was a cable, network, device, or backend behavior.
+
 ### Discovery succeeds, but simulation fails
 
 Discovery alone does not prove developer services are ready. Verify Developer Mode, developer-image preparation, and the developer connection using the setup commands above.
@@ -630,7 +697,7 @@ Discovery sets `NO_COLOR=1` and `TERM=dumb` for plain output. Confirm those envi
 - “Session launched” is a process-level state, not a confirmed device-level simulation state.
 - A process-exit callback does not detect every connection loss if the process stays running.
 - Discovery does not yet have an explicit timeout.
-- Stop and Quit cleanup paths are not fully serialized against each other.
+- Busy operations reject conflicting Start/Stop requests and cancel new Quit requests; requests are not queued for later execution.
 - A timed-out clear process is asked to terminate; forced termination and comprehensive child-process management are not implemented.
 - Cleanup-needed state is not persisted across crashes or Force Quit.
 - Multiple windows and competing session controllers have not been validated.
@@ -641,15 +708,22 @@ Discovery sets `NO_COLOR=1` and `TERM=dumb` for plain output. Confirm those envi
 - Connection labels are discovery snapshots, not continuous monitoring or the selected session transport.
 - No automatic USB-to-Wi-Fi session handoff, reconnection policy, or standalone operation away from a reachable Mac.
 - No guarantee that Find My or every third-party app uses or displays the simulated location in the same way.
+- Developer-information probes confirm connection responsiveness, not active simulation or correct GPS.
+- Helper connection setup and context teardown do not yet have complete end-to-end timeout/cancellation coverage.
+- Helper protocol messages are printed to stdout; Swift does not yet parse readiness or cleanup events into independently verified device state.
+- The helper path depends on the documented repository layout until packaging is implemented.
 - No claim that simulation is undetectable. Apple exposes location-source information that apps can inspect.
 - Recovery can require restarting the iPhone.
 
 ## Roadmap
 
-- [ ] A single session state machine shared by the UI and lifecycle handler.
-- [ ] Serialized Start, Stop, and Quit operations.
+- [x] A shared observable session state used by the UI and lifecycle handler.
+- [x] Guard incompatible Start/Stop operations and handle busy Quit requests.
+- [ ] Coordinated cancellation and queued-operation behavior, if needed.
 - [ ] Discovery timeouts and better backend error capture.
-- [ ] More reliable recovery and process cleanup.
+- [x] Use a repository-owned asynchronous simulation helper.
+- [x] Manually verify repeated sessions after a post-clear DVT round trip.
+- [ ] Harden recovery, timeout handling, and child-process cleanup further.
 - [ ] Explicit device selection and identity checks.
 - [x] Document and manually exercise wireless operation through Personal Hotspot.
 - [x] Show USB / Wi-Fi discovery labels with a last-checked timestamp.
@@ -660,7 +734,8 @@ Discovery sets `NO_COLOR=1` and `TERM=dumb` for plain output. Confirm those envi
 - [ ] Bookmarks and optional local location history.
 - [ ] Route and GPX playback.
 - [ ] A reviewed minimum macOS deployment target and wider compatibility testing.
-- [ ] Dependency version management and reproducible setup.
+- [x] Pin the backend dependency in `backend/requirements.txt`.
+- [ ] Lock transitive dependencies and validate clean-install reproducibility.
 - [ ] Reviewed licensing and packaging for a distributable release.
 - [ ] Signed and notarized builds with a bundled backend, if pursued.
 
